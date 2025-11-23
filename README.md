@@ -1,5 +1,7 @@
 # Twitter Geoblocker
 
+Fork of [twitter-account-location-in-username](https://github.com/RhysSullivan/twitter-account-location-in-username) with enhanced features.
+
 Chrome extension that displays country flag emojis next to Twitter/X usernames based on account location and allows blocking content from specific countries.
 
 ## Features
@@ -20,8 +22,8 @@ The extension uses Twitter's GraphQL API (`AboutAccountQuery`) to fetch account 
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/teknetekne/twitter-geoblocker.git
-   cd twitter-geoblocker
+   git clone https://github.com/teknetekne/twitter-account-location-in-username.git
+   cd twitter-account-location-in-username
    ```
 
 2. Open Chrome and navigate to `chrome://extensions/`
@@ -30,7 +32,7 @@ The extension uses Twitter's GraphQL API (`AboutAccountQuery`) to fetch account 
 
 4. Click "Load unpacked"
 
-5. Select the `twitter-geoblocker` directory
+5. Select the extension directory
 
 ## Usage
 
@@ -60,6 +62,13 @@ This extension:
 - **Rate Limiting**: 2 second intervals between requests, max 2 concurrent requests
 - **Supported Platforms**: Chrome/Chromium-based browsers
 
+## Improvements Over Original
+
+- **Soft Blocking**: Blocked content shows a placeholder with "View" option instead of being completely hidden
+- **30-Day Cache**: Location data is cached for 30 days to minimize API requests and help with rate limits
+- **Enhanced Rate Limiting**: Improved queue management and rate limit handling
+- **Better UI**: Enhanced popup interface with country search and blocking management
+
 ## Credits
 
-Based on [twitter-account-location-in-username](https://github.com/RhysSullivan/twitter-account-location-in-username) by [RhysSullivan](https://github.com/RhysSullivan).
+Fork of [twitter-account-location-in-username](https://github.com/RhysSullivan/twitter-account-location-in-username) by [RhysSullivan](https://github.com/RhysSullivan).
