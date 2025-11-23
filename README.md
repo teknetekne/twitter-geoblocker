@@ -1,90 +1,65 @@
-# Twitter Account Location Flag Chrome Extension
+# Twitter Geoblocker
 
-A Chrome extension that displays country flag emojis next to Twitter/X usernames based on the account's location information.
+Chrome extension that displays country flag emojis next to Twitter/X usernames based on account location and allows blocking content from specific countries.
 
 ## Features
 
-- Automatically detects usernames on Twitter/X pages
-- Queries Twitter's GraphQL API to get account location information
-- Displays the corresponding country flag emoji next to usernames
-- Works with dynamically loaded content (infinite scroll)
-- Caches location data to minimize API calls
-
-## Installation
-
-1. Clone or download this repository
-2. Open Chrome and navigate to `chrome://extensions/`
-3. Enable "Developer mode" (toggle in the top right)
-4. Click "Load unpacked"
-5. Select the directory containing this extension
-6. The extension will now be active on Twitter/X pages
+- **Country Flags**: Automatically displays country flag emojis next to usernames based on the account's location data from Twitter/X profiles
+- **Country Blocking**: Select countries to hide posts and user content from
+- **Soft Blocking**: Blocked content shows a placeholder with a "View" button to reveal content when needed
+- **Theme Support**: Fully compatible with Twitter's Light, Dim, and Lights Out themes
+- **Smart Caching**: Caches location data for 30 days to minimize API requests
+- **Rate Limiting**: Built-in rate limiting and queue management to respect Twitter API limits
+- **Dynamic Content**: Automatically processes new content as you scroll using MutationObserver
 
 ## How It Works
 
-1. The extension runs a content script on all Twitter/X pages
-2. It identifies username elements in tweets and user profiles
-3. For each username, it queries Twitter's GraphQL API endpoint (`AboutAccountQuery`) to get the account's location
-4. The location is mapped to a flag emoji using the country flags mapping
-5. The flag emoji is displayed next to the username
+The extension uses Twitter's GraphQL API (`AboutAccountQuery`) to fetch account location data. It intercepts Twitter's own API calls to capture authentication headers, then makes requests to get the `account_based_in` field from user profiles. Location data is cached locally to reduce API calls and improve performance.
 
-## Files
+## Installation
 
-- `manifest.json` - Chrome extension configuration
-- `content.js` - Main content script that processes the page and injects page scripts for API calls
-- `countryFlags.js` - Country name to flag emoji mapping
-- `README.md` - This file
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/teknetekne/twitter-geoblocker.git
+   cd twitter-geoblocker
+   ```
 
-## Technical Details
+2. Open Chrome and navigate to `chrome://extensions/`
 
-The extension uses a page script injection approach to make API requests. This allows it to:
-- Access the same cookies and authentication as the logged-in user
-- Make same-origin requests to Twitter's API without CORS issues
-- Work seamlessly with Twitter's authentication system
+3. Enable "Developer mode" in the top right corner
 
-The content script injects a script into the page context that listens for location fetch requests. When a username is detected, the content script sends a custom event to the page script, which makes the API request and returns the location data.
+4. Click "Load unpacked"
 
-## API Endpoint
+5. Select the `twitter-geoblocker` directory
 
-The extension uses Twitter's GraphQL API endpoint:
-```
-https://x.com/i/api/graphql/XRqGa7EeokUU5kppkh13EA/AboutAccountQuery
-```
+## Usage
 
-With variables:
-```json
-{
-  "screenName": "username"
-}
-```
-
-The response contains `account_based_in` field in:
-```
-data.user_result_by_screen_name.result.about_profile.account_based_in
-```
-
-## Limitations
-
-- Requires the user to be logged into Twitter/X
-- Only works for accounts that have location information available
-- Country names must match the mapping in `countryFlags.js` (case-insensitive)
-- Rate limiting may apply if making too many requests
+1. Click the extension icon in the Chrome toolbar
+2. **Enable Extension**: Toggle the main switch to turn the extension on/off
+3. **Show Country Flags**: Toggle to show/hide flag emojis next to usernames (blocking still works when flags are hidden)
+4. **Block Countries**:
+   - Use the "All Countries" tab to search and select countries to block
+   - Use the "Blocked" tab to view and manage your blocked countries list
+5. Browse X (Twitter) - flags will appear next to usernames and blocked content will be hidden with a placeholder
 
 ## Privacy
 
-- The extension only queries public account information
-- No data is stored or transmitted to third-party servers
-- All API requests are made directly to Twitter/X servers
-- Location data is cached locally in memory
+This extension:
+- Only runs on `x.com` and `twitter.com` domains
+- Uses Twitter's own GraphQL API endpoints (no external servers)
+- Stores location cache and preferences locally in Chrome's storage
+- Captures authentication headers from Twitter's own requests (no manual login required)
+- Does not send any data to external servers
+- Respects Twitter's rate limits to avoid API abuse
 
-## Troubleshooting
+## Technical Details
 
-If flags are not appearing:
-1. Make sure you're logged into Twitter/X
-2. Check the browser console for any error messages
-3. Verify that the account has location information available
-4. Try refreshing the page
+- **Manifest Version**: 3
+- **API Endpoint**: Twitter GraphQL API (`AboutAccountQuery`)
+- **Cache Duration**: 30 days
+- **Rate Limiting**: 2 second intervals between requests, max 2 concurrent requests
+- **Supported Platforms**: Chrome/Chromium-based browsers
 
-## License
+## Credits
 
-MIT
-
+Based on [twitter-account-location-in-username](https://github.com/RhysSullivan/twitter-account-location-in-username) by [RhysSullivan](https://github.com/RhysSullivan).

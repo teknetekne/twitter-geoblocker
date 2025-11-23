@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Twitter Account Location Flag",
+  "name": "Twitter Geoblocker",
   "version": "1.0.0",
   "description": "Shows country flag emoji next to Twitter usernames based on account location",
   "permissions": [
@@ -10,7 +10,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Twitter Location Flag"
+    "default_title": "Twitter Geoblocker"
   },
   "host_permissions": [
     "https://x.com/*",
@@ -22,13 +22,18 @@
         "https://x.com/*",
         "https://twitter.com/*"
       ],
-      "js": ["countryFlags.js", "content.js"],
+      "js": [
+        "countryFlags.js",
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["pageScript.js"],
+      "resources": [
+        "pageScript.js"
+      ],
       "matches": [
         "https://x.com/*",
         "https://twitter.com/*"
@@ -36,4 +41,3 @@
     }
   ]
 }
-

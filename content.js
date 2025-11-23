@@ -17,30 +17,46 @@ let observer = null;
 
 // Extension enabled state
 let extensionEnabled = true;
+let showFlags = true;
 const TOGGLE_KEY = 'extension_enabled';
+const FLAG_TOGGLE_KEY = 'show_flags';
+const BLOCKED_COUNTRIES_KEY = 'blocked_countries';
 const DEFAULT_ENABLED = true;
+const DEFAULT_SHOW_FLAGS = true;
+
+// Blocked countries
+let blockedCountries = new Set();
 
 // Track usernames currently being processed to avoid duplicate requests
 const processingUsernames = new Set();
 
-// Load enabled state
+// Load enabled state and blocked countries
 async function loadEnabledState() {
   try {
-    const result = await chrome.storage.local.get([TOGGLE_KEY]);
+    const result = await chrome.storage.local.get([TOGGLE_KEY, FLAG_TOGGLE_KEY, BLOCKED_COUNTRIES_KEY]);
     extensionEnabled = result[TOGGLE_KEY] !== undefined ? result[TOGGLE_KEY] : DEFAULT_ENABLED;
+    showFlags = result[FLAG_TOGGLE_KEY] !== undefined ? result[FLAG_TOGGLE_KEY] : DEFAULT_SHOW_FLAGS;
+
+    if (result[BLOCKED_COUNTRIES_KEY]) {
+      blockedCountries = new Set(result[BLOCKED_COUNTRIES_KEY]);
+    }
+
     console.log('Extension enabled:', extensionEnabled);
+    console.log('Show flags:', showFlags);
+    console.log('Blocked countries:', blockedCountries);
   } catch (error) {
     console.error('Error loading enabled state:', error);
     extensionEnabled = DEFAULT_ENABLED;
+    showFlags = DEFAULT_SHOW_FLAGS;
   }
 }
 
-// Listen for toggle changes from popup
+// Listen for toggle changes and blocked countries updates from popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'extensionToggle') {
     extensionEnabled = request.enabled;
     console.log('Extension toggled:', extensionEnabled);
-    
+
     if (extensionEnabled) {
       // Re-initialize if enabled
       setTimeout(() => {
@@ -50,6 +66,32 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       // Remove all flags if disabled
       removeAllFlags();
     }
+  } else if (request.type === 'flagToggle') {
+    showFlags = request.showFlags;
+    console.log('Show flags toggled:', showFlags);
+    if (!showFlags) {
+      removeAllFlags(); // Remove visual flags but keep blocking active
+      // We need to re-process to ensure blocking is still active if needed, 
+      // but since removeAllFlags clears data-flag-added, processUsernames will run again
+      setTimeout(() => {
+        processUsernames();
+      }, 500);
+    } else {
+      // If turning flags on, re-process
+      // We need to reset data-flag-added for non-blocked items to allow adding flags
+      const processed = document.querySelectorAll('[data-flag-added="true"]');
+      processed.forEach(el => {
+        delete el.dataset.flagAdded;
+      });
+      setTimeout(() => {
+        processUsernames();
+      }, 500);
+    }
+  } else if (request.type === 'blockedCountriesUpdate') {
+    blockedCountries = new Set(request.countries);
+    console.log('Blocked countries updated:', blockedCountries);
+    // Re-process to apply new blocking rules
+    processUsernames();
   }
 });
 
@@ -61,12 +103,12 @@ async function loadCache() {
       console.log('Extension context invalidated, skipping cache load');
       return;
     }
-    
+
     const result = await chrome.storage.local.get(CACHE_KEY);
     if (result[CACHE_KEY]) {
       const cached = result[CACHE_KEY];
       const now = Date.now();
-      
+
       // Filter out expired entries and null entries (allow retry)
       for (const [username, data] of Object.entries(cached)) {
         if (data.expiry && data.expiry > now && data.location !== null) {
@@ -77,8 +119,8 @@ async function loadCache() {
     }
   } catch (error) {
     // Extension context invalidated errors are expected when extension is reloaded
-    if (error.message?.includes('Extension context invalidated') || 
-        error.message?.includes('message port closed')) {
+    if (error.message?.includes('Extension context invalidated') ||
+      error.message?.includes('message port closed')) {
       console.log('Extension context invalidated, cache load skipped');
     } else {
       console.error('Error loading cache:', error);
@@ -94,11 +136,11 @@ async function saveCache() {
       console.log('Extension context invalidated, skipping cache save');
       return;
     }
-    
+
     const cacheObj = {};
     const now = Date.now();
     const expiry = now + (CACHE_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
-    
+
     for (const [username, location] of locationCache.entries()) {
       cacheObj[username] = {
         location: location,
@@ -106,12 +148,12 @@ async function saveCache() {
         cachedAt: now
       };
     }
-    
+
     await chrome.storage.local.set({ [CACHE_KEY]: cacheObj });
   } catch (error) {
     // Extension context invalidated errors are expected when extension is reloaded
-    if (error.message?.includes('Extension context invalidated') || 
-        error.message?.includes('message port closed')) {
+    if (error.message?.includes('Extension context invalidated') ||
+      error.message?.includes('message port closed')) {
       console.log('Extension context invalidated, cache save skipped');
     } else {
       console.error('Error saving cache:', error);
@@ -126,7 +168,7 @@ async function saveCacheEntry(username, location) {
     console.log('Extension context invalidated, skipping cache entry save');
     return;
   }
-  
+
   locationCache.set(username, location);
   // Debounce saves - only save every 5 seconds
   if (!saveCache.timeout) {
@@ -141,11 +183,11 @@ async function saveCacheEntry(username, location) {
 function injectPageScript() {
   const script = document.createElement('script');
   script.src = chrome.runtime.getURL('pageScript.js');
-  script.onload = function() {
+  script.onload = function () {
     this.remove();
   };
   (document.head || document.documentElement).appendChild(script);
-  
+
   // Listen for rate limit info from page script
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
@@ -162,7 +204,7 @@ async function processRequestQueue() {
   if (isProcessingQueue || requestQueue.length === 0) {
     return;
   }
-  
+
   // Check if we're rate limited
   if (rateLimitResetTime > 0) {
     const now = Math.floor(Date.now() / 1000);
@@ -176,22 +218,22 @@ async function processRequestQueue() {
       rateLimitResetTime = 0;
     }
   }
-  
+
   isProcessingQueue = true;
-  
+
   while (requestQueue.length > 0 && activeRequests < MAX_CONCURRENT_REQUESTS) {
     const now = Date.now();
     const timeSinceLastRequest = now - lastRequestTime;
-    
+
     // Wait if needed to respect rate limit
     if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
       await new Promise(resolve => setTimeout(resolve, MIN_REQUEST_INTERVAL - timeSinceLastRequest));
     }
-    
+
     const { screenName, resolve, reject } = requestQueue.shift();
     activeRequests++;
     lastRequestTime = Date.now();
-    
+
     // Make the request
     makeLocationRequest(screenName)
       .then(location => {
@@ -206,7 +248,7 @@ async function processRequestQueue() {
         setTimeout(processRequestQueue, 200);
       });
   }
-  
+
   isProcessingQueue = false;
 }
 
@@ -214,39 +256,39 @@ async function processRequestQueue() {
 function makeLocationRequest(screenName) {
   return new Promise((resolve, reject) => {
     const requestId = Date.now() + Math.random();
-    
+
     // Listen for response via postMessage
     const handler = (event) => {
       // Only accept messages from the page (not from extension)
       if (event.source !== window) return;
-      
-      if (event.data && 
-          event.data.type === '__locationResponse' &&
-          event.data.screenName === screenName && 
-          event.data.requestId === requestId) {
+
+      if (event.data &&
+        event.data.type === '__locationResponse' &&
+        event.data.screenName === screenName &&
+        event.data.requestId === requestId) {
         window.removeEventListener('message', handler);
         const location = event.data.location;
         const isRateLimited = event.data.isRateLimited || false;
-        
+
         // Only cache if not rate limited (don't cache failures due to rate limiting)
         if (!isRateLimited) {
           saveCacheEntry(screenName, location || null);
         } else {
           console.log(`Not caching null for ${screenName} due to rate limit`);
         }
-        
+
         resolve(location || null);
       }
     };
     window.addEventListener('message', handler);
-    
+
     // Send fetch request to page script via postMessage
     window.postMessage({
       type: '__fetchLocation',
       screenName,
       requestId
     }, '*');
-    
+
     // Timeout after 10 seconds
     setTimeout(() => {
       window.removeEventListener('message', handler);
@@ -272,7 +314,7 @@ async function getUserLocation(screenName) {
       locationCache.delete(screenName);
     }
   }
-  
+
   console.log(`Queueing API request for ${screenName}`);
   // Queue the request
   return new Promise((resolve, reject) => {
@@ -294,60 +336,60 @@ function extractUsername(element) {
         const username = match[1];
         // Filter out common routes
         const excludedRoutes = ['home', 'explore', 'notifications', 'messages', 'i', 'compose', 'search', 'settings', 'bookmarks', 'lists', 'communities'];
-        if (!excludedRoutes.includes(username) && 
-            !username.startsWith('hashtag') &&
-            !username.startsWith('search') &&
-            username.length > 0 &&
-            username.length < 20) { // Usernames are typically short
+        if (!excludedRoutes.includes(username) &&
+          !username.startsWith('hashtag') &&
+          !username.startsWith('search') &&
+          username.length > 0 &&
+          username.length < 20) { // Usernames are typically short
           return username;
         }
       }
     }
   }
-  
+
   // Try finding username links in the entire element (broader search)
   const allLinks = element.querySelectorAll('a[href^="/"]');
   const seenUsernames = new Set();
-  
+
   for (const link of allLinks) {
     const href = link.getAttribute('href');
     if (!href) continue;
-    
+
     const match = href.match(/^\/([^\/\?]+)/);
     if (!match || !match[1]) continue;
-    
+
     const potentialUsername = match[1];
-    
+
     // Skip if we've already checked this username
     if (seenUsernames.has(potentialUsername)) continue;
     seenUsernames.add(potentialUsername);
-    
+
     // Filter out routes and invalid usernames
     const excludedRoutes = ['home', 'explore', 'notifications', 'messages', 'i', 'compose', 'search', 'settings', 'bookmarks', 'lists', 'communities', 'hashtag'];
     if (excludedRoutes.some(route => potentialUsername === route || potentialUsername.startsWith(route))) {
       continue;
     }
-    
+
     // Skip status/tweet links
     if (potentialUsername.includes('status') || potentialUsername.match(/^\d+$/)) {
       continue;
     }
-    
+
     // Check link text/content for username indicators
     const text = link.textContent?.trim() || '';
     const linkText = text.toLowerCase();
     const usernameLower = potentialUsername.toLowerCase();
-    
+
     // If link text starts with @, it's definitely a username
     if (text.startsWith('@')) {
       return potentialUsername;
     }
-    
+
     // If link text matches the username (without @), it's likely a username
     if (linkText === usernameLower || linkText === `@${usernameLower}`) {
       return potentialUsername;
     }
-    
+
     // Check if link is in a UserName container or has username-like structure
     const parent = link.closest('[data-testid="UserName"], [data-testid="User-Name"]');
     if (parent) {
@@ -356,7 +398,7 @@ function extractUsername(element) {
         return potentialUsername;
       }
     }
-    
+
     // Also check if link text is @username format
     if (text && text.trim().startsWith('@')) {
       const atUsername = text.trim().substring(1);
@@ -365,7 +407,7 @@ function extractUsername(element) {
       }
     }
   }
-  
+
   // Last resort: look for @username pattern in text content and verify with link
   const textContent = element.textContent || '';
   const atMentionMatches = textContent.matchAll(/@([a-zA-Z0-9_]+)/g);
@@ -381,7 +423,7 @@ function extractUsername(element) {
       }
     }
   }
-  
+
   return null;
 }
 
@@ -411,7 +453,7 @@ function createLoadingShimmer() {
   shimmer.style.background = 'linear-gradient(90deg, rgba(113, 118, 123, 0.2) 25%, rgba(113, 118, 123, 0.4) 50%, rgba(113, 118, 123, 0.2) 75%)';
   shimmer.style.backgroundSize = '200% 100%';
   shimmer.style.animation = 'shimmer 1.5s infinite';
-  
+
   // Add animation keyframes if not already added
   if (!document.getElementById('twitter-flag-shimmer-style')) {
     const style = document.createElement('style');
@@ -428,7 +470,7 @@ function createLoadingShimmer() {
     `;
     document.head.appendChild(style);
   }
-  
+
   return shimmer;
 }
 
@@ -454,282 +496,306 @@ async function addFlagToUsername(usernameElement, screenName) {
   // Mark as processing to avoid duplicate requests
   usernameElement.dataset.flagAdded = 'processing';
   processingUsernames.add(screenName);
-  
+
   // Find User-Name container for shimmer placement
-  const userNameContainer = usernameElement.querySelector('[data-testid="UserName"], [data-testid="User-Name"]');
-  
-  // Create and insert loading shimmer
-  const shimmerSpan = createLoadingShimmer();
+  let userNameContainer = null;
+  let shimmerSpan = null;
   let shimmerInserted = false;
-  
-  if (userNameContainer) {
-    // Try to insert shimmer before handle section (same place flag will go)
-    const handleSection = findHandleSection(userNameContainer, screenName);
-    if (handleSection && handleSection.parentNode) {
-      try {
-        handleSection.parentNode.insertBefore(shimmerSpan, handleSection);
-        shimmerInserted = true;
-      } catch (e) {
+
+  // Only create and insert shimmer if flags are enabled
+  if (showFlags) {
+    userNameContainer = usernameElement.querySelector('[data-testid="UserName"], [data-testid="User-Name"]');
+
+    // Create and insert loading shimmer
+    shimmerSpan = createLoadingShimmer();
+
+    if (userNameContainer) {
+      // Try to insert shimmer before handle section (same place flag will go)
+      const handleSection = findHandleSection(userNameContainer, screenName);
+      if (handleSection && handleSection.parentNode) {
+        try {
+          handleSection.parentNode.insertBefore(shimmerSpan, handleSection);
+          shimmerInserted = true;
+        } catch (e) {
+          // Fallback: insert at end of container
+          try {
+            userNameContainer.appendChild(shimmerSpan);
+            shimmerInserted = true;
+          } catch (e2) {
+            console.log('Failed to insert shimmer');
+          }
+        }
+      } else {
         // Fallback: insert at end of container
         try {
           userNameContainer.appendChild(shimmerSpan);
           shimmerInserted = true;
-        } catch (e2) {
+        } catch (e) {
           console.log('Failed to insert shimmer');
         }
       }
-    } else {
-      // Fallback: insert at end of container
-      try {
-        userNameContainer.appendChild(shimmerSpan);
-        shimmerInserted = true;
-      } catch (e) {
-        console.log('Failed to insert shimmer');
-      }
     }
   }
-  
+
   try {
     console.log(`Processing flag for ${screenName}...`);
 
     // Get location
     const location = await getUserLocation(screenName);
     console.log(`Location for ${screenName}:`, location);
-    
+
     // Remove shimmer
     if (shimmerInserted && shimmerSpan.parentNode) {
       shimmerSpan.remove();
     }
-    
+
     if (!location) {
       console.log(`No location found for ${screenName}, marking as failed`);
       usernameElement.dataset.flagAdded = 'failed';
       return;
     }
 
-  // Get flag emoji
-  const flag = getCountryFlag(location);
-  if (!flag) {
-    console.log(`No flag found for location: ${location}`);
-    // Shimmer already removed above, but ensure it's gone
-    if (shimmerInserted && shimmerSpan.parentNode) {
-      shimmerSpan.remove();
+    // Check if country is blocked
+    if (blockedCountries.has(location)) {
+      console.log(`Blocking content from ${screenName} (${location})`);
+      hideContent(usernameElement, location);
+      usernameElement.dataset.flagAdded = 'blocked';
+      return;
+    } else {
+      // Ensure content is visible if it was previously hidden but now unblocked
+      showContent(usernameElement);
     }
-    usernameElement.dataset.flagAdded = 'failed';
-    return;
-  }
-  
-  console.log(`Found flag ${flag} for ${screenName} (${location})`);
 
-  // Find the username link - try multiple strategies
-  // Priority: Find the @username link, not the display name link
-  let usernameLink = null;
-  
-  // Find the User-Name container (reuse from above if available, otherwise find it)
-  const containerForLink = userNameContainer || usernameElement.querySelector('[data-testid="UserName"], [data-testid="User-Name"]');
-  
-  // Strategy 1: Find link with @username text content (most reliable - this is the actual handle)
-  if (containerForLink) {
-    const containerLinks = containerForLink.querySelectorAll('a[href^="/"]');
-    for (const link of containerLinks) {
-      const text = link.textContent?.trim();
-      const href = link.getAttribute('href');
-      const match = href.match(/^\/([^\/\?]+)/);
-      
-      // Prioritize links that have @username as text
-      if (match && match[1] === screenName) {
-        if (text === `@${screenName}` || text === screenName) {
-          usernameLink = link;
-          break;
-        }
+    // Get flag emoji
+    const flag = getCountryFlag(location);
+    if (!flag) {
+      console.log(`No flag found for location: ${location}`);
+      // Shimmer already removed above, but ensure it's gone
+      if (shimmerInserted && shimmerSpan.parentNode) {
+        shimmerSpan.remove();
       }
+      usernameElement.dataset.flagAdded = 'failed';
+      return;
     }
-  }
-  
-  // Strategy 2: Find any link with @username text in UserName container
-  if (!usernameLink && containerForLink) {
-    const containerLinks = containerForLink.querySelectorAll('a[href^="/"]');
-    for (const link of containerLinks) {
-      const text = link.textContent?.trim();
-      if (text === `@${screenName}`) {
-        usernameLink = link;
-        break;
-      }
-    }
-  }
-  
-  // Strategy 3: Find link with exact matching href that has @username text anywhere in element
-  if (!usernameLink) {
-    const links = usernameElement.querySelectorAll('a[href^="/"]');
-    for (const link of links) {
-      const href = link.getAttribute('href');
-      const text = link.textContent?.trim();
-      if ((href === `/${screenName}` || href.startsWith(`/${screenName}?`)) && 
-          (text === `@${screenName}` || text === screenName)) {
-        usernameLink = link;
-        break;
-      }
-    }
-  }
-  
-  // Strategy 4: Fallback to any matching href (but prefer ones not in display name area)
-  if (!usernameLink) {
-    const links = usernameElement.querySelectorAll('a[href^="/"]');
-    for (const link of links) {
-      const href = link.getAttribute('href');
-      const match = href.match(/^\/([^\/\?]+)/);
-      if (match && match[1] === screenName) {
-        // Skip if this looks like a display name link (has verification badge nearby)
-        const hasVerificationBadge = link.closest('[data-testid="User-Name"]')?.querySelector('[data-testid="icon-verified"]');
-        if (!hasVerificationBadge || link.textContent?.trim() === `@${screenName}`) {
-          usernameLink = link;
-          break;
-        }
-      }
-    }
-  }
 
-  if (!usernameLink) {
-    console.error(`Could not find username link for ${screenName}`);
-    console.error('Available links in container:', Array.from(usernameElement.querySelectorAll('a[href^="/"]')).map(l => ({
-      href: l.getAttribute('href'),
-      text: l.textContent?.trim()
-    })));
-    // Remove shimmer on error
-    if (shimmerInserted && shimmerSpan.parentNode) {
-      shimmerSpan.remove();
-    }
-    usernameElement.dataset.flagAdded = 'failed';
-    return;
-  }
-  
-  console.log(`Found username link for ${screenName}:`, usernameLink.href, usernameLink.textContent?.trim());
+    console.log(`Found flag ${flag} for ${screenName} (${location})`);
 
-  // Check if flag already exists (check in the entire container, not just parent)
-  const existingFlag = usernameElement.querySelector('[data-twitter-flag]');
-  if (existingFlag) {
-    // Remove shimmer if flag already exists
-    if (shimmerInserted && shimmerSpan.parentNode) {
-      shimmerSpan.remove();
+    // Check if flags should be shown
+    if (!showFlags) {
+      // Mark as processed but don't add flag
+      usernameElement.dataset.flagAdded = 'true';
+      return;
     }
-    usernameElement.dataset.flagAdded = 'true';
-    return;
-  }
 
-  // Add flag emoji - place it next to verification badge, before @ handle
-  const flagSpan = document.createElement('span');
-  flagSpan.textContent = ` ${flag}`;
-  flagSpan.setAttribute('data-twitter-flag', 'true');
-  flagSpan.style.marginLeft = '4px';
-  flagSpan.style.marginRight = '4px';
-  flagSpan.style.display = 'inline';
-  flagSpan.style.color = 'inherit';
-  flagSpan.style.verticalAlign = 'middle';
-  
-  // Use userNameContainer found above, or find it if not found
-  const containerForFlag = userNameContainer || usernameElement.querySelector('[data-testid="UserName"], [data-testid="User-Name"]');
-  
-  if (!containerForFlag) {
-    console.error(`Could not find UserName container for ${screenName}`);
-    // Remove shimmer on error
-    if (shimmerInserted && shimmerSpan.parentNode) {
-      shimmerSpan.remove();
-    }
-    usernameElement.dataset.flagAdded = 'failed';
-    return;
-  }
-  
-  // Find the verification badge (SVG with data-testid="icon-verified")
-  const verificationBadge = containerForFlag.querySelector('[data-testid="icon-verified"]');
-  
-  // Find the handle section - the div that contains the @username link
-  // The structure is: User-Name > div (display name) > div (handle section with @username)
-  const handleSection = findHandleSection(containerForFlag, screenName);
+    // Find the username link - try multiple strategies
+    // Priority: Find the @username link, not the display name link
+    let usernameLink = null;
 
-  let inserted = false;
-  
-  // Strategy 1: Insert right before the handle section div (which contains @username)
-  // The handle section is a direct child of User-Name container
-  if (handleSection && handleSection.parentNode === containerForFlag) {
-    try {
-      containerForFlag.insertBefore(flagSpan, handleSection);
-      inserted = true;
-      console.log(`✓ Inserted flag before handle section for ${screenName}`);
-    } catch (e) {
-      console.log('Failed to insert before handle section:', e);
-    }
-  }
-  
-  // Strategy 2: Find the handle section's parent and insert before it
-  if (!inserted && handleSection && handleSection.parentNode) {
-    try {
-      // Insert before the handle section's parent (if it's not User-Name)
-      const handleParent = handleSection.parentNode;
-      if (handleParent !== containerForFlag && handleParent.parentNode) {
-        handleParent.parentNode.insertBefore(flagSpan, handleParent);
-        inserted = true;
-        console.log(`✓ Inserted flag before handle parent for ${screenName}`);
-      } else if (handleParent === containerForFlag) {
-        // Handle section is direct child, insert before it
-        containerForFlag.insertBefore(flagSpan, handleSection);
-        inserted = true;
-        console.log(`✓ Inserted flag before handle section (direct child) for ${screenName}`);
-      }
-    } catch (e) {
-      console.log('Failed to insert before handle parent:', e);
-    }
-  }
-  
-  // Strategy 3: Find display name container and insert after it, before handle section
-  if (!inserted && handleSection) {
-    try {
-      // Find the display name link (first link)
-      const displayNameLink = containerForFlag.querySelector('a[href^="/"]');
-      if (displayNameLink) {
-        // Find the div that contains the display name link
-        const displayNameContainer = displayNameLink.closest('div');
-        if (displayNameContainer && displayNameContainer.parentNode) {
-          // Check if handle section is a sibling
-          if (displayNameContainer.parentNode === handleSection.parentNode) {
-            displayNameContainer.parentNode.insertBefore(flagSpan, handleSection);
-            inserted = true;
-            console.log(`✓ Inserted flag between display name and handle (siblings) for ${screenName}`);
-          } else {
-            // Try inserting after display name container
-            displayNameContainer.parentNode.insertBefore(flagSpan, displayNameContainer.nextSibling);
-            inserted = true;
-            console.log(`✓ Inserted flag after display name container for ${screenName}`);
+    // Find the User-Name container (reuse from above if available, otherwise find it)
+    const containerForLink = userNameContainer || usernameElement.querySelector('[data-testid="UserName"], [data-testid="User-Name"]');
+
+    // Strategy 1: Find link with @username text content (most reliable - this is the actual handle)
+    if (containerForLink) {
+      const containerLinks = containerForLink.querySelectorAll('a[href^="/"]');
+      for (const link of containerLinks) {
+        const text = link.textContent?.trim();
+        const href = link.getAttribute('href');
+        const match = href.match(/^\/([^\/\?]+)/);
+
+        // Prioritize links that have @username as text
+        if (match && match[1] === screenName) {
+          if (text === `@${screenName}` || text === screenName) {
+            usernameLink = link;
+            break;
           }
         }
       }
-    } catch (e) {
-      console.log('Failed to insert after display name:', e);
     }
-  }
-  
-  // Strategy 4: Insert at the end of User-Name container (fallback)
-  if (!inserted) {
-    try {
-      containerForFlag.appendChild(flagSpan);
-      inserted = true;
-      console.log(`✓ Inserted flag at end of UserName container for ${screenName}`);
-    } catch (e) {
-      console.error('Failed to append flag to User-Name container:', e);
+
+    // Strategy 2: Find any link with @username text in UserName container
+    if (!usernameLink && containerForLink) {
+      const containerLinks = containerForLink.querySelectorAll('a[href^="/"]');
+      for (const link of containerLinks) {
+        const text = link.textContent?.trim();
+        if (text === `@${screenName}`) {
+          usernameLink = link;
+          break;
+        }
+      }
     }
-  }
-  
+
+    // Strategy 3: Find link with exact matching href that has @username text anywhere in element
+    if (!usernameLink) {
+      const links = usernameElement.querySelectorAll('a[href^="/"]');
+      for (const link of links) {
+        const href = link.getAttribute('href');
+        const text = link.textContent?.trim();
+        if ((href === `/${screenName}` || href.startsWith(`/${screenName}?`)) &&
+          (text === `@${screenName}` || text === screenName)) {
+          usernameLink = link;
+          break;
+        }
+      }
+    }
+
+    // Strategy 4: Fallback to any matching href (but prefer ones not in display name area)
+    if (!usernameLink) {
+      const links = usernameElement.querySelectorAll('a[href^="/"]');
+      for (const link of links) {
+        const href = link.getAttribute('href');
+        const match = href.match(/^\/([^\/\?]+)/);
+        if (match && match[1] === screenName) {
+          // Skip if this looks like a display name link (has verification badge nearby)
+          const hasVerificationBadge = link.closest('[data-testid="User-Name"]')?.querySelector('[data-testid="icon-verified"]');
+          if (!hasVerificationBadge || link.textContent?.trim() === `@${screenName}`) {
+            usernameLink = link;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!usernameLink) {
+      console.error(`Could not find username link for ${screenName}`);
+      console.error('Available links in container:', Array.from(usernameElement.querySelectorAll('a[href^="/"]')).map(l => ({
+        href: l.getAttribute('href'),
+        text: l.textContent?.trim()
+      })));
+      // Remove shimmer on error
+      if (shimmerInserted && shimmerSpan.parentNode) {
+        shimmerSpan.remove();
+      }
+      usernameElement.dataset.flagAdded = 'failed';
+      return;
+    }
+
+    console.log(`Found username link for ${screenName}:`, usernameLink.href, usernameLink.textContent?.trim());
+
+    // Check if flag already exists (check in the entire container, not just parent)
+    const existingFlag = usernameElement.querySelector('[data-twitter-flag]');
+    if (existingFlag) {
+      // Remove shimmer if flag already exists
+      if (shimmerInserted && shimmerSpan.parentNode) {
+        shimmerSpan.remove();
+      }
+      usernameElement.dataset.flagAdded = 'true';
+      return;
+    }
+
+    // Add flag emoji - place it next to verification badge, before @ handle
+    const flagSpan = document.createElement('span');
+    flagSpan.textContent = ` ${flag}`;
+    flagSpan.setAttribute('data-twitter-flag', 'true');
+    flagSpan.style.marginLeft = '4px';
+    flagSpan.style.marginRight = '4px';
+    flagSpan.style.display = 'inline';
+    flagSpan.style.color = 'inherit';
+    flagSpan.style.verticalAlign = 'middle';
+
+    // Use userNameContainer found above, or find it if not found
+    const containerForFlag = userNameContainer || usernameElement.querySelector('[data-testid="UserName"], [data-testid="User-Name"]');
+
+    if (!containerForFlag) {
+      console.error(`Could not find UserName container for ${screenName}`);
+      // Remove shimmer on error
+      if (shimmerInserted && shimmerSpan.parentNode) {
+        shimmerSpan.remove();
+      }
+      usernameElement.dataset.flagAdded = 'failed';
+      return;
+    }
+
+    // Find the verification badge (SVG with data-testid="icon-verified")
+    const verificationBadge = containerForFlag.querySelector('[data-testid="icon-verified"]');
+
+    // Find the handle section - the div that contains the @username link
+    // The structure is: User-Name > div (display name) > div (handle section with @username)
+    const handleSection = findHandleSection(containerForFlag, screenName);
+
+    let inserted = false;
+
+    // Strategy 1: Insert right before the handle section div (which contains @username)
+    // The handle section is a direct child of User-Name container
+    if (handleSection && handleSection.parentNode === containerForFlag) {
+      try {
+        containerForFlag.insertBefore(flagSpan, handleSection);
+        inserted = true;
+        console.log(`✓ Inserted flag before handle section for ${screenName}`);
+      } catch (e) {
+        console.log('Failed to insert before handle section:', e);
+      }
+    }
+
+    // Strategy 2: Find the handle section's parent and insert before it
+    if (!inserted && handleSection && handleSection.parentNode) {
+      try {
+        // Insert before the handle section's parent (if it's not User-Name)
+        const handleParent = handleSection.parentNode;
+        if (handleParent !== containerForFlag && handleParent.parentNode) {
+          handleParent.parentNode.insertBefore(flagSpan, handleParent);
+          inserted = true;
+          console.log(`✓ Inserted flag before handle parent for ${screenName}`);
+        } else if (handleParent === containerForFlag) {
+          // Handle section is direct child, insert before it
+          containerForFlag.insertBefore(flagSpan, handleSection);
+          inserted = true;
+          console.log(`✓ Inserted flag before handle section (direct child) for ${screenName}`);
+        }
+      } catch (e) {
+        console.log('Failed to insert before handle parent:', e);
+      }
+    }
+
+    // Strategy 3: Find display name container and insert after it, before handle section
+    if (!inserted && handleSection) {
+      try {
+        // Find the display name link (first link)
+        const displayNameLink = containerForFlag.querySelector('a[href^="/"]');
+        if (displayNameLink) {
+          // Find the div that contains the display name link
+          const displayNameContainer = displayNameLink.closest('div');
+          if (displayNameContainer && displayNameContainer.parentNode) {
+            // Check if handle section is a sibling
+            if (displayNameContainer.parentNode === handleSection.parentNode) {
+              displayNameContainer.parentNode.insertBefore(flagSpan, handleSection);
+              inserted = true;
+              console.log(`✓ Inserted flag between display name and handle (siblings) for ${screenName}`);
+            } else {
+              // Try inserting after display name container
+              displayNameContainer.parentNode.insertBefore(flagSpan, displayNameContainer.nextSibling);
+              inserted = true;
+              console.log(`✓ Inserted flag after display name container for ${screenName}`);
+            }
+          }
+        }
+      } catch (e) {
+        console.log('Failed to insert after display name:', e);
+      }
+    }
+
+    // Strategy 4: Insert at the end of User-Name container (fallback)
+    if (!inserted) {
+      try {
+        containerForFlag.appendChild(flagSpan);
+        inserted = true;
+        console.log(`✓ Inserted flag at end of UserName container for ${screenName}`);
+      } catch (e) {
+        console.error('Failed to append flag to User-Name container:', e);
+      }
+    }
+
     if (inserted) {
       // Mark as processed
       usernameElement.dataset.flagAdded = 'true';
       console.log(`✓ Successfully added flag ${flag} for ${screenName} (${location})`);
-      
+
       // Also mark any other containers waiting for this username
       const waitingContainers = document.querySelectorAll(`[data-flag-added="waiting"]`);
       waitingContainers.forEach(container => {
         const waitingUsername = extractUsername(container);
         if (waitingUsername === screenName) {
           // Try to add flag to this container too
-          addFlagToUsername(container, screenName).catch(() => {});
+          addFlagToUsername(container, screenName).catch(() => { });
         }
       });
     } else {
@@ -759,18 +825,175 @@ async function addFlagToUsername(usernameElement, screenName) {
 function removeAllFlags() {
   const flags = document.querySelectorAll('[data-twitter-flag]');
   flags.forEach(flag => flag.remove());
-  
+
   // Also remove any loading shimmers
   const shimmers = document.querySelectorAll('[data-twitter-flag-shimmer]');
   shimmers.forEach(shimmer => shimmer.remove());
-  
+
   // Reset flag added markers
   const containers = document.querySelectorAll('[data-flag-added]');
   containers.forEach(container => {
     delete container.dataset.flagAdded;
   });
-  
+
   console.log('Removed all flags');
+}
+
+// Helper to hide content (tweet or user cell) with placeholder
+function hideContent(element, country) {
+  const container = element.closest('article[data-testid="tweet"], [data-testid="UserCell"]');
+  if (container) {
+    // Check if already hidden/placeholder exists
+    if (container.dataset.twitterLocationBlocked === 'true') {
+      return;
+    }
+
+    // Create placeholder
+    const placeholder = document.createElement('div');
+    placeholder.className = 'twitter-location-flag-placeholder';
+    placeholder.style.padding = '12px 16px';
+    placeholder.style.borderBottom = '1px solid rgb(239, 243, 244)';
+    // Use inherit to respect theme colors
+    placeholder.style.color = 'inherit';
+    placeholder.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+    placeholder.style.fontSize = '15px';
+    placeholder.style.display = 'flex';
+    placeholder.style.justifyContent = 'space-between';
+    placeholder.style.alignItems = 'center';
+    placeholder.style.width = '100%'; // Ensure full width
+    placeholder.style.boxSizing = 'border-box'; // Include padding in width
+
+    const message = document.createElement('span');
+    message.textContent = `This post is hidden because it is from ${country}`;
+
+    const viewButton = document.createElement('button');
+    viewButton.textContent = 'View';
+    viewButton.style.backgroundColor = 'transparent';
+    viewButton.style.border = '1px solid currentColor'; // Will be updated by updateThemeColors
+    viewButton.style.borderRadius = '9999px';
+    viewButton.style.cursor = 'pointer';
+    viewButton.style.fontSize = '14px';
+    viewButton.style.fontWeight = 'bold';
+    viewButton.style.padding = '4px 12px';
+    viewButton.style.marginLeft = '12px';
+    viewButton.style.transition = 'background-color 0.2s';
+    viewButton.style.opacity = '0.7'; // Make it slightly subtle
+
+    // Initial theme update
+    updateThemeColors(placeholder, message, viewButton);
+
+    // Observe theme changes
+    const themeObserver = new MutationObserver(() => {
+      updateThemeColors(placeholder, message, viewButton);
+    });
+
+    themeObserver.observe(document.body, {
+      attributes: true,
+      attributeFilter: ['style', 'class']
+    });
+
+    // Store observer to disconnect later if needed (e.g. when showing content)
+    placeholder._themeObserver = themeObserver;
+
+    viewButton.onmouseover = () => {
+      const isDark = isDarkMode();
+      viewButton.style.backgroundColor = isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(15, 20, 25, 0.1)';
+      viewButton.style.opacity = '1';
+    };
+    viewButton.onmouseout = () => {
+      viewButton.style.backgroundColor = 'transparent';
+      viewButton.style.opacity = '0.7';
+    };
+
+    viewButton.onclick = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (placeholder._themeObserver) {
+        placeholder._themeObserver.disconnect();
+      }
+      showContent(element);
+    };
+
+    placeholder.appendChild(message);
+    placeholder.appendChild(viewButton);
+
+    // Hide original content visually but keep in DOM
+    // We can't use display: none on the container because it might break virtual scrolling or layout
+    // Instead, we'll hide the children and append placeholder
+
+    // Mark container as blocked
+    container.dataset.twitterLocationBlocked = 'true';
+
+    // Save original display style of children
+    Array.from(container.children).forEach(child => {
+      if (child !== placeholder) {
+        child.dataset.originalDisplay = child.style.display;
+        child.style.display = 'none';
+      }
+    });
+
+    container.appendChild(placeholder);
+  }
+}
+
+// Helper to check if dark mode is active
+function isDarkMode() {
+  const bgColor = getComputedStyle(document.body).backgroundColor;
+  // Check if background is dark (rgb values < 128)
+  const rgb = bgColor.match(/\d+/g);
+  if (rgb) {
+    const brightness = (parseInt(rgb[0]) * 299 + parseInt(rgb[1]) * 587 + parseInt(rgb[2]) * 114) / 1000;
+    return brightness < 128;
+  }
+  return false;
+}
+
+// Helper to update colors based on theme
+function updateThemeColors(placeholder, message, viewButton) {
+  const isDark = isDarkMode();
+
+  if (isDark) {
+    // Dark mode (Dim or Lights out)
+    placeholder.style.borderBottom = '1px solid rgb(47, 51, 54)';
+    placeholder.style.color = 'rgb(231, 233, 234)'; // Primary text
+    message.style.color = 'rgb(113, 118, 123)'; // Secondary text
+    viewButton.style.color = 'rgb(231, 233, 234)'; // Button text
+    viewButton.style.borderColor = 'rgb(83, 100, 113)'; // Button border
+  } else {
+    // Light mode
+    placeholder.style.borderBottom = '1px solid rgb(239, 243, 244)';
+    placeholder.style.color = 'rgb(15, 20, 25)'; // Primary text
+    message.style.color = 'rgb(83, 100, 113)'; // Secondary text
+    viewButton.style.color = 'rgb(15, 20, 25)'; // Button text
+    viewButton.style.borderColor = 'rgb(207, 217, 222)'; // Button border
+  }
+}
+
+// Helper to show content (if it was hidden)
+function showContent(element) {
+  const container = element.closest('article[data-testid="tweet"], [data-testid="UserCell"]');
+  if (container && container.dataset.twitterLocationBlocked === 'true') {
+    // Remove placeholder
+    const placeholder = container.querySelector('.twitter-location-flag-placeholder');
+    if (placeholder) {
+      if (placeholder._themeObserver) {
+        placeholder._themeObserver.disconnect();
+      }
+      placeholder.remove();
+    }
+
+    // Restore children
+    Array.from(container.children).forEach(child => {
+      if (child.dataset.originalDisplay !== undefined) {
+        child.style.display = child.dataset.originalDisplay;
+        delete child.dataset.originalDisplay;
+      } else {
+        child.style.display = '';
+      }
+    });
+
+    delete container.dataset.twitterLocationBlocked;
+  }
 }
 
 // Function to process all username elements on the page
@@ -779,16 +1002,16 @@ async function processUsernames() {
   if (!extensionEnabled) {
     return;
   }
-  
+
   // Find all tweet/article containers and user cells
   const containers = document.querySelectorAll('article[data-testid="tweet"], [data-testid="UserCell"], [data-testid="User-Names"], [data-testid="User-Name"]');
-  
+
   console.log(`Processing ${containers.length} containers for usernames`);
-  
+
   let foundCount = 0;
   let processedCount = 0;
   let skippedCount = 0;
-  
+
   for (const container of containers) {
     const screenName = extractUsername(container);
     if (screenName) {
@@ -812,7 +1035,7 @@ async function processUsernames() {
       }
     }
   }
-  
+
   if (foundCount > 0) {
     console.log(`Found ${foundCount} usernames, processing ${processedCount} new ones, skipped ${skippedCount} already processed`);
   } else {
@@ -831,7 +1054,7 @@ function initObserver() {
     if (!extensionEnabled) {
       return;
     }
-    
+
     let shouldProcess = false;
     for (const mutation of mutations) {
       if (mutation.addedNodes.length > 0) {
@@ -839,7 +1062,7 @@ function initObserver() {
         break;
       }
     }
-    
+
     if (shouldProcess) {
       // Debounce processing
       setTimeout(processUsernames, 500);
@@ -854,31 +1077,31 @@ function initObserver() {
 
 // Main initialization
 async function init() {
-  console.log('Twitter Location Flag extension initialized');
-  
+  console.log('Twitter Geoblocker extension initialized');
+
   // Load enabled state first
   await loadEnabledState();
-  
+
   // Load persistent cache
   await loadCache();
-  
+
   // Only proceed if extension is enabled
   if (!extensionEnabled) {
     console.log('Extension is disabled');
     return;
   }
-  
+
   // Inject page script
   injectPageScript();
-  
+
   // Wait a bit for page to fully load
   setTimeout(() => {
     processUsernames();
   }, 2000);
-  
+
   // Set up observer for new content
   initObserver();
-  
+
   // Re-process on navigation (Twitter uses SPA)
   let lastUrl = location.href;
   new MutationObserver(() => {
@@ -889,7 +1112,7 @@ async function init() {
       setTimeout(processUsernames, 2000);
     }
   }).observe(document, { subtree: true, childList: true });
-  
+
   // Save cache periodically
   setInterval(saveCache, 30000); // Save every 30 seconds
 }
